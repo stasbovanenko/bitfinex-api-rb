@@ -86,23 +86,11 @@ module Bitfinex
     end
 
     def callbacks
-      @callbacks ||= []
+      @callbacks ||= {}
     end
 
-    def add_callback(&block)
-      id = 0
-      @mutex.synchronize do
-        callbacks[@c_counter] = { block: block, chan_id: nil }
-        id = @c_counter
-        @c_counter += 1
-      end
-      id
-    end
-
-    def register_authenticated_channel(msg, &block)
-      sub_id = add_callback(&block)
-      msg.merge!(subId: sub_id.to_s)
-      ws_safe_send(msg.merge(event:'subscribe'))
+    def add_callback(subj, &block)
+      @mutex.synchronize { callbacks[subj] = block }
     end
 
     def ws_safe_send(msg)
@@ -113,36 +101,43 @@ module Bitfinex
       end
     end
 
+    def register_authenticated_channel(msg, &block)
+      puts "reg auth channel"
+      register_channel(msg, &block)
+    end
+
     def register_channel(msg, &block)
-      sub_id = add_callback(&block)
-      msg.merge!(subId: sub_id.to_s)
-      if ws_open
-        ws_client.send msg.merge(event: 'subscribe')
-      else
-        ws_registration_messages.push msg.merge(event: 'subscribe')
-      end
+      add_callback(msg_subj(msg), &block)
+      # msg.merge!(subId: sub_id.to_s)
+      puts "Bitfinex-rb subscribing: #{msg}"
+      ws_safe_send msg.merge(event: 'subscribe')
+    end
+
+    def msg_subj(msg) # Temp id for WS channel till we get real one from server
+      m = msg.map { |k, v| [k.to_sym, v] }.to_h # symbolize msg keys
+      [ m[:key], m[:symbol], m[:pair] ].detect{|i| !i.nil?} + m[:channel]
     end
 
     def listen
       ws_client.on(:message) do |rmsg|
+      binding.pry
          msg = JSON.parse(rmsg)
+         puts "Bitfinex-rb got response. Raw: #{rmsg}. Formated: #{msg}"
          if msg.kind_of?(Hash) && msg["event"] == "subscribed"
-           save_channel_id(msg["subId"],msg["chanId"])
+           save_channel_id(msg_subj(msg),msg["chanId"])
          elsif msg.kind_of?(Array)
            exec_callback_for(msg)
          end
       end
     end
 
-    def save_channel_id(sub_id,chan_id)
-      callbacks[sub_id.to_i][:chan_id] = chan_id
-      chan_ids[chan_id] = sub_id.to_i
+    def save_channel_id(subj,chan_id)
+      @mutex.synchronize { callbacks[chan_id] = callbacks.delete(subj) }
     end
 
     def exec_callback_for(msg)
       return if msg[1] == 'hb' #ignore heartbeat
-      id = msg[0]
-      callbacks[chan_ids[id.to_i]][:block].call(msg)
+      callbacks[msg.first].call(msg.last)
     end
 
     def subscribe_to_channels
